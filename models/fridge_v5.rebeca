@@ -1,0 +1,207 @@
+// ============================================================
+// Fridge case-study model v5 (Rebeca)  --  BENCHMARK VERSION
+//
+// v4 is kept unchanged as the validated artifact: its 166,652-state
+// closure was enumerated exhaustively and 363/363 of Afra's exported
+// transitions were reproduced. v5 changes two numbers in `main` and
+// nothing else in the semantics, so that validation still describes
+// the same transition relation.
+//
+// WHY v5 EXISTS. v4's surrogate target was `compressorOn`, and that
+// target is unusable. It is a hysteresis latch, so:
+//
+//   * its final value equals the direction of the LAST threshold
+//     crossing -- measured 100.0% on every configuration tried, with
+//     no state carried at all;
+//   * its full flip set equals the direction-alternation points of the
+//     crossing subsequence -- also 100.0% exactly, including on traces
+//     with 2 or more flips, median token gap 2-3.
+//
+// So a network trained to predict `compressorOn` reaches ceiling by
+// looking at one late token, and attending to anything earlier reduces
+// the loss by exactly zero. The "recency bias" blamed across nineteen
+// experiments was the OPTIMAL policy for the task as posed, not a
+// defect of the attention mechanism. No re-parameterisation fixes
+// this, because it is a property of hysteresis latches.
+//
+// THE v5 TARGET is a safety property instead of a state variable:
+//
+//     temperature > 20        (SAFE_CAP, see below)
+//
+// and the explanation ground truth is counterfactual: a doorOpened()
+// is causal iff deleting it from the processed message log removes the
+// violation. No expert is in the loop, and it generalises to any
+// property.
+//
+// WHY THIS ONE IS HARD, in one paragraph. tick() is guarded by
+// `if (temperature < 15)`, so ticking alone can reach 15 and never
+// pass it; only the UNCAPPED doorOpened() +3 can. SAFE_CAP is set to
+// 20, which is strictly ABOVE the tick ceiling of 15, so a breach
+// needs door openings to ACCUMULATE faster than cool() removes 10.
+// Whether they do is decided by the interleaving of two actors that
+// never synchronise -- precisely the thing actor-based verification
+// exists for. And because a TICK processed at 15 is a no-op that looks
+// identical to every other TICK, deciding which messages mattered
+// requires the running temperature, i.e. the whole prefix. There is no
+// local window that does it.
+//
+// MEASURED ON 3000 SAMPLED TRACES (v4_safety.py --lazy --preset):
+//   violation rate                       54.4%   (balanced label)
+//   causal set size                      mean 4.5 of 6 door openings
+//   best zero-parameter stateless rule   83.8% set-F1 / 68.8% exact
+//   recency rule                          9.7% set-F1 /  1.0% exact
+//   "which opening broke it": spread over the 3rd..6th opening, so the
+//   best positional guess ("the last one") reaches 41.0% against 16.7%
+//   for a coin toss among openings.
+//   Compare rule G on the v4 latch target: 100.0% exact. That flat
+//   ceiling is what v5 removes.
+//
+// QUEUE CAPACITIES, recomputed for maxTicks=12 / maxOpens=6 rather than
+// carried over. Counting argument as in v4: Sensor can hold at most one
+// pending self.tick(), plus all 6 doorOpened(), plus one cool() per
+// turnOn(); turnOn() fires only on an up-flip and flips alternate, so
+// turnOn <= 6. Worst case 1 + 6 + 6 = 13, declared 20. Controller
+// receives one reportTemp per tick, <= 12, declared 14. Compressor
+// receives turnOn + turnOff <= 12, declared 14. Door holds at most one
+// pending self.tryOpen(), declared 3. No overflow by construction.
+// ============================================================
+
+reactiveclass Sensor(20) {
+    knownrebecs {
+        Controller controller;
+    }
+
+    statevars {
+        int temperature;
+        int ticksLeft;
+    }
+
+    Sensor(int initTemp, int maxTicks) {
+        temperature = initTemp;
+        ticksLeft = maxTicks;
+        self.tick();
+    }
+
+    // The guard below is the whole reason the benchmark is non-trivial:
+    // a tick processed at temperature 15 is PROCESSED, is LOGGED, and
+    // changes nothing. Note also that a trace contains maxTicks + 1
+    // tick() messages, the last of which does nothing because
+    // ticksLeft has reached 0. Any replay of the temperature has to
+    // carry that budget or it disagrees with the model.
+    msgsrv tick() {
+        if (ticksLeft > 0) {
+            ticksLeft = ticksLeft - 1;
+            if (temperature < 15) {
+                temperature = temperature + 1;
+            }
+            controller.reportTemp(temperature);
+            self.tick();
+        }
+    }
+
+    // UNCAPPED, deliberately. This is the only message that can push
+    // the temperature past 15, so it is the only possible witness for
+    // the safety violation.
+    msgsrv doorOpened() {
+        temperature = temperature + 3;
+    }
+
+    msgsrv cool() {
+        temperature = temperature - 10;
+        if (temperature < 0) {
+            temperature = 0;
+        }
+    }
+}
+
+reactiveclass Door(3) {
+    knownrebecs {
+        Sensor sensor;
+    }
+
+    statevars {
+        int opensLeft;
+    }
+
+    Door(int maxOpens) {
+        opensLeft = maxOpens;
+        self.tryOpen();
+    }
+
+    msgsrv tryOpen() {
+        if (opensLeft > 0) {
+            opensLeft = opensLeft - 1;
+            sensor.doorOpened();
+            self.tryOpen();
+        }
+    }
+}
+
+// The thermostat is UNCHANGED from v4. It is no longer the prediction
+// target, but it still drives cool(), and cool() is what the door
+// openings have to outrun. Keeping it identical is what lets v4 and v5
+// be compared as an ablation with one variable changed.
+reactiveclass Controller(14) {
+    knownrebecs {
+        Compressor compressor;
+    }
+
+    statevars {
+        boolean compressorOn;
+    }
+
+    Controller() {
+        compressorOn = false;
+    }
+
+    msgsrv reportTemp(int temp) {
+        if (temp > 7 && !compressorOn) {
+            compressorOn = true;
+            compressor.turnOn();
+        } else {
+            if (temp <= 3 && compressorOn) {
+                compressorOn = false;
+                compressor.turnOff();
+            }
+        }
+    }
+}
+
+reactiveclass Compressor(14) {
+    knownrebecs {
+        Sensor sensor;
+    }
+
+    statevars {
+        int consecutiveOnCycles;
+    }
+
+    Compressor() {
+        consecutiveOnCycles = 0;
+    }
+
+    msgsrv turnOn() {
+        consecutiveOnCycles = consecutiveOnCycles + 1;
+        sensor.cool();
+    }
+
+    msgsrv turnOff() {
+        consecutiveOnCycles = 0;
+    }
+}
+
+main {
+    // initTemp=5 unchanged; maxTicks 6 -> 12 and maxOpens 3 -> 6. Those
+    // two numbers are the entire diff from v4, and they were chosen by
+    // grid search over (maxOpens, maxTicks, SAFE_CAP) scoring
+    // |50 - violation rate| + best-stateless-rule exact match.
+    //
+    // A warning about scale: at maxTicks=12 the reachable closure is far
+    // beyond what Afra can export (v4 at maxTicks=6 already had 166,652
+    // states and Afra's export truncated at 266). Generate traces by
+    // sampling instead: v4_safety.py --lazy --preset.
+    Sensor sensorRebec(controllerRebec):(5, 12);
+    Door doorRebec(sensorRebec):(6);
+    Controller controllerRebec(compressorRebec):();
+    Compressor compressorRebec(sensorRebec):();
+}

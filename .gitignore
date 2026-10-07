@@ -1,0 +1,13 @@
+# macOS / Python
+.DS_Store
+__pycache__/
+*.pyc
+
+# Large generated data (regenerate with src/safety.py)
+data/*.json
+data/*.jsonl
+!data/README.md
+
+# Model checkpoints
+*.pt
+checkpoints/

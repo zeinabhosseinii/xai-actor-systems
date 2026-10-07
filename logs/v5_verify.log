@@ -1,0 +1,67 @@
+=== 1. target detection, including the refusal on the stale file ===
+   traces_v4.json                                       latch        ok
+   traces_v4_safety.json                                refused      ok
+      (traces_v4_safety.json looks like a safety file but has no safe_cap...)
+   traces_v5_safety.json                                safety       ok
+
+=== 2. data path (asserts inside build_safety must all pass) ===
+target from traces_v5_safety.json: temperature>20  (safe_cap=20, tick_cap=15)
+temperature replay: 3000/3000 traces reproduced exactly
+   vocabulary            : TICK, TRYOPEN, DOOROPENED, COOL, REPORTTEMP
+   records               : 3000
+   sequence lengths      : 39 .. 42
+   COOL is in the vocabulary                            True         ok
+   TURNON is not                                        True         ok
+   payload channel is all zero by default               True         ok
+   causal indices land on DOOROPENED after remap        0            ok
+   resp indices land on DOOROPENED after remap          0            ok
+   per-step target is monotone (never un-violates)      0            ok
+   last step equals the trace label                     0            ok
+
+=== 3. cross-check the baselines against v4_safety.py ===
+   violation rate                                       54.4%        ok
+   over-determined share of violations                  36.7%        ok
+   mean |causal| over eligible                          4.51         ok
+   recency Top-1                                        9.4%         ok
+   recency set-F1                                       9.7%         ok
+   recency exact                                        1.0%         ok
+   DOOROPENED latest first Top-1                        64.7%        ok
+   DOOROPENED latest first set-F1                       83.8%        ok
+   DOOROPENED latest first exact                        64.7%        ok
+   DOOROPENED earliest first Top-1                      68.8%        ok
+   DOOROPENED earliest first set-F1                     74.9%        ok
+   DOOROPENED earliest first exact                      68.8%        ok
+   oracle Top-1                                         100.0%       ok
+   oracle set-F1                                        100.0%       ok
+   oracle exact                                         100.0%       ok
+   'every DOOROPENED' F1  (the metric trap)             83.0%        ok
+   'every DOOROPENED' exact (the honest floor)          39.9%        ok
+   blame of a random opening (floor)                    68.5%        ok
+   blame of the best opening (ceiling)                  80.6%        ok
+
+=== 4. the metrics, fed explanations whose score is known a priori ===
+   ground truth as attention, exact-set (handed |c|)    100.0%       ok
+   ground truth as attention, cardinality-free exact    100.0%       ok
+   attention on every opening -> the 39.9% floor        39.9%        ok
+   uniform attention names nothing (threshold sanity)   0            ok
+
+=== 5. the latch path is intact as a negative control ===
+thresholds from traces_v4.json: HI=11 LO=7
+   latch records built                                  True         ok
+   same tuple width as safety records                   7            ok
+   latch extra field is an empty dict                   {}           ok
+   latch vocabulary excludes COOL (it is an EFFECT there) True         ok
+
+=== 6. what this harness does NOT verify ===
+   Nothing above creates a tensor. The model class, the attention
+   decomposition assert, the training loop, faithfulness and occlude
+   are all UNTESTED -- torch cannot be installed here (proxy 403).
+   Run locally:
+     python3 -m venv ~/venvs/xai && . ~/venvs/xai/bin/activate
+     python3 -m pip install torch
+     python3 v4_surrogate.py --traces traces_v5_safety.json --read values
+     python3 v4_surrogate.py --traces traces_v5_safety.json --read hidden
+     python3 v4_surrogate.py --traces traces_v5_safety.json --keep-payload
+     python3 v4_surrogate.py --traces traces_v4.json   # negative control
+
+ALL CHECKS PASSED

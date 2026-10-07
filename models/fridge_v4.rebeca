@@ -1,0 +1,189 @@
+// ============================================================
+// Fridge case-study model v4 (Rebeca)
+//
+// DIFF vs the v3 "deadlock" variant you sent:
+//   1. Compressor now KNOWS the Sensor and actually cools it.
+//      This is the ONE change that makes `temperature` non-monotone,
+//      and therefore the only change that makes the turnOff branch
+//      reachable at all. In v3 `temp <= 3` was unreachable, so
+//      turnOff() was dead code and compressorOn was a write-once
+//      latch with at most one flip per trace, ever.
+//   2. Sensor gains `msgsrv cool()`, with a floor at 0.
+//   3. Sensor queue widened 8 -> 12 to absorb the extra cool()
+//      messages (bound recomputed below).
+//   4. The idle() self-loops stay REMOVED, as in your deadlock
+//      variant. Every execution now reaches a real terminal state,
+//      and Afra's "deadlock" report at that state is the intended
+//      end of the run, not an error: a configuration with all
+//      queues empty is a legitimate final state.
+//
+// WHY IT STILL TERMINATES AND STILL CANNOT OVERFLOW:
+//   cool() sends NO messages -- it only writes a state variable --
+//   so the feedback edge Controller -> Compressor -> Sensor adds no
+//   message growth at all. Totals stay bounded by ticksLeft and
+//   opensLeft exactly as in v3:
+//     self.tick      : 1 + maxTicks  = 7   (<= 1 pending at a time)
+//     reportTemp     : maxTicks      = 6
+//     self.tryOpen   : 1 + maxOpens  = 4   (<= 1 pending at a time)
+//     doorOpened     : maxOpens      = 3
+//     turnOn/turnOff : <= 1 per reportTemp processed, and they must
+//                      alternate starting from false, so <= 3 each
+//     cool           : exactly 1 per turnOn, so <= 3
+//   Worst-case queue occupancy: Sensor 1 + 3 + 3 = 7 (cap 12),
+//   Controller 6 (cap 9), Compressor 6 (cap 9), Door 1 (cap 6).
+//   So no overflow, by computed worst case rather than by luck.
+//
+// WHY THE COOLING STEP IS -10 (this arithmetic matters):
+//   turnOff needs a REPORTED value <= 3. A reported value is the
+//   temperature AFTER that tick's +1, so we need temperature <= 2
+//   immediately after cool() runs. With initTemp=5 the flip fires
+//   at reported temp 8..12 in this configuration, so cool() has to
+//   subtract at least 10. Flips that happen at 13 or above will not
+//   reach the lower threshold -- that is intentional, and it is a
+//   real source of interleaving-dependent diversity rather than a
+//   bug. After compiling, confirm reachability directly: search the
+//   exported state space for a transition labelled turnOff. If
+//   there is none, raise this constant.
+//
+// NOTE: verify exact Rebeca/Afra syntax against your environment's
+// examples before compiling -- treat as a draft to adapt.
+// ============================================================
+
+reactiveclass Sensor(12) {
+    knownrebecs {
+        Controller controller;
+    }
+
+    statevars {
+        int temperature;
+        int ticksLeft;
+    }
+
+    Sensor(int initTemp, int maxTicks) {
+        temperature = initTemp;
+        ticksLeft = maxTicks;
+        self.tick();
+    }
+
+    msgsrv tick() {
+        if (ticksLeft > 0) {
+            ticksLeft = ticksLeft - 1;
+            if (temperature < 15) {
+                temperature = temperature + 1;
+            }
+            controller.reportTemp(temperature);
+            self.tick();
+        }
+    }
+
+    // sent independently by Door, whenever Door decides to open --
+    // NOT synchronized with tick() in any way. One of the two
+    // sources of interleaving nondeterminism.
+    msgsrv doorOpened() {
+        temperature = temperature + 3;
+    }
+
+    // NEW IN v4. The compressor finally does something physical.
+    // Sends no messages, so it adds no message growth and the queue
+    // bounds above still hold. The floor keeps temperature in
+    // [0, 24] so the state space stays finite and physical.
+    msgsrv cool() {
+        temperature = temperature - 10;
+        if (temperature < 0) {
+            temperature = 0;
+        }
+    }
+}
+
+reactiveclass Door(6) {
+    knownrebecs {
+        Sensor sensor;
+    }
+
+    statevars {
+        int opensLeft;
+    }
+
+    Door(int maxOpens) {
+        opensLeft = maxOpens;
+        self.tryOpen();
+    }
+
+    // no idle() self-loop: when opensLeft hits 0 this actor simply
+    // goes quiet, which is what lets the whole execution terminate.
+    msgsrv tryOpen() {
+        if (opensLeft > 0) {
+            opensLeft = opensLeft - 1;
+            sensor.doorOpened();
+            self.tryOpen();
+        }
+    }
+}
+
+reactiveclass Controller(9) {
+    knownrebecs {
+        Compressor compressor;
+    }
+
+    statevars {
+        boolean compressorOn;
+    }
+
+    Controller() {
+        compressorOn = false;
+    }
+
+    // Unchanged from v3 on purpose: the thermostat logic was never
+    // the problem. What changed is that with cooling in place the
+    // lower branch is now REACHABLE, so compressorOn can oscillate
+    // instead of latching once and staying put.
+    msgsrv reportTemp(int temp) {
+        if (temp > 7 && !compressorOn) {
+            compressorOn = true;
+            compressor.turnOn();
+        } else {
+            if (temp <= 3 && compressorOn) {
+                compressorOn = false;
+                compressor.turnOff();
+            }
+        }
+    }
+}
+
+reactiveclass Compressor(9) {
+    knownrebecs {
+        Sensor sensor;          // NEW IN v4: closes the feedback loop
+    }
+
+    statevars {
+        int consecutiveOnCycles;
+    }
+
+    Compressor() {
+        consecutiveOnCycles = 0;
+    }
+
+    msgsrv turnOn() {
+        consecutiveOnCycles = consecutiveOnCycles + 1;
+        sensor.cool();          // NEW IN v4
+    }
+
+    msgsrv turnOff() {
+        consecutiveOnCycles = 0;
+    }
+}
+
+main {
+    // initTemp=5, maxTicks=6, maxOpens=3 -- same configuration as v3
+    // so the three datasets (v3-truncated, v3-deadlock, v4) form a
+    // clean ablation ladder with only one variable changing at a time.
+    //
+    // Note the cycle in the knownrebecs graph:
+    //   Sensor -> Controller -> Compressor -> Sensor
+    // Forward references in main are fine; v3 already relied on this
+    // when it passed controllerRebec to sensorRebec.
+    Sensor sensorRebec(controllerRebec):(5, 6);
+    Door doorRebec(sensorRebec):(3);
+    Controller controllerRebec(compressorRebec):();
+    Compressor compressorRebec(sensorRebec):();
+}

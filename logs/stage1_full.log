@@ -1,0 +1,89 @@
+=== 0. self-test (hand-computed, no XML needed) ===
+   1_0 has exactly 2 successors                               ok
+   1_0 labels are {TICK, TRYOPEN}                             ok
+   1_0 --TICK--> 2_0 (temp 5->6, reportTemp(6) queued)        ok
+   1_0 --TRYOPEN--> 3_0 (opens 3->2, doorOpened queued)       ok
+   bag semantics: TICK;TRYOPEN and TRYOPEN;TICK meet at 5_0   ok
+   4_0 offers both queued payloads, 6 and 7                   ok
+   4_0's two REPORTTEMPs lead to 2 DISTINCT states            ok
+   neither 6 nor 7 flips compressorOn (7 > 7 is false)        ok
+   4_0 --TICK--> 9_0 has temp 8, ticksLeft 3, 3 reportTemps queued ok
+   reportTemp(8) sets compressorOn and queues turnOn          ok
+   turnOn increments cycles AND queues cool() on the sensor   ok
+   cool() subtracts 10 (10 -> 0)                              ok
+   cool() floors at 0, never negative (4 -> 0)                ok
+   reportTemp(1) with compressorOn clears it and queues turnOff ok
+   turnOff resets consecutiveOnCycles to 0                    ok
+   doorOpened is UNCAPPED: 13 -> 16 (kept deliberately)       ok
+   tick IS capped: temp stays 15 while ticksLeft still decrements ok
+   tick with ticksLeft 0 consumes the message and sends nothing ok
+   tryOpen with opensLeft 0 consumes the message and sends nothing ok
+   all queues empty == terminal (this is the intended end of a run) ok
+
+=== 1. cross-validation against Afra's export ===
+states in export      : 266
+transitions in export : 363
+initial state matches : True
+edges reproduced      : 363/363
+   -> the reimplementation below is Afra's semantics, verified.
+truncation: 126/266 states have FEWER successors in the export than the
+            semantics allows -> the export is a prefix, not the closure.
+            e.g. 29_0(0/6), 47_0(0/6), 57_0(0/6), 76_0(0/6), 81_0(0/6), 102_0(0/6)
+
+=== 2. the FULL state space (enumerated here, not by Afra) ===
+reachable states : 166652
+transitions      : 773800
+max BFS depth    : 29
+transitions by label:
+   TICK         97244
+   TRYOPEN     102919
+   DOOROPENED   67044
+   REPORTTEMP  393504
+   TURNON       28004
+   COOL         35405
+   TURNOFF      49680
+TURNON : TURNOFF = 0.6 : 1
+terminal states (all queues empty) : 53
+   final compressorOn True : 29/53 = 54.7%
+temperature range observed : 0 .. 20
+   (max > 15 confirms the uncapped doorOpened() bug)
+consecutiveOnCycles values : [0, 1, 2, 3]
+   max sensor      queue = 5  (declared cap 12)
+   max door        queue = 1  (declared cap 6)
+   max controller  queue = 6  (declared cap 9)
+   max compressor  queue = 5  (declared cap 9)
+
+=== 2b. structural invariants ===
+fixed counts 7/4/3/6 per trace : 4000/4000 ok
+length == 20 + 2*on + off      : 4000/4000 ok
+payload-latch oracle           : 4000/4000 ok
+   -> oracle ok means the surrogate's target is a 2-state latch over
+      payloads, NOT a function of position. Problem #1 cannot recur.
+
+=== 3. generated traces + zero-parameter baselines ===
+traces                 : 4000
+length  min/mean/max   : 22 / 22.2 / 29
+flips per trace        : [(1, 3571), (2, 237), (3, 153), (4, 37), (5, 1), (6, 1)]
+traces with >=1 flip   : 4000/4000
+1st decisive message, normalised position:
+   mean=0.373  median=0.381  p05=0.182  p95=0.619
+   -> if this is no longer pinned near 1.0, position has stopped
+      being a sufficient statistic and problem #1 is dead.
+
+Top-1 = rule's best guess is A decisive message.
+Set-F1 = rule's top-k (k = true #flips) vs the true causal set.
+   A recency (all positions, latest first)            Top-1=  0.0%  set-F1=  0.6%
+   B REPORTTEMP first, then latest                    Top-1=  3.9%  set-F1=  4.4%
+   C REPORTTEMP first, then EARLIEST                  Top-1= 32.7%  set-F1= 33.1%
+   D payload>7 earliest, then rest                    Top-1=100.0%  set-F1= 95.4%
+   E payload>7 or <=3, earliest (per-position test)   Top-1=100.0%  set-F1= 97.0%
+   F informed random over REPORTTEMPs                 Top-1= 16.7%  (must be beaten)
+
+READ RULE E CAREFULLY. It is the strongest thing a PER-POSITION scorer
+can do: test this message's payload against both thresholds, ignoring
+all state. In v3 the equivalent rule scored 100% because compressorOn
+was a write-once latch. If E is now well under 100%, then v4 genuinely
+REQUIRES tracking compressorOn across the prefix, i.e. it is a real
+benchmark and the surrogate finally has something to learn.
+
+wrote traces_v4.json

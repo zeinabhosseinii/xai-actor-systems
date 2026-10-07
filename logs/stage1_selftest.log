@@ -1,0 +1,45 @@
+=== 0. self-test (hand-computed, no XML needed) ===
+   1_0 has exactly 2 successors                               ok
+   1_0 labels are {TICK, TRYOPEN}                             ok
+   1_0 --TICK--> 2_0 (temp 5->6, reportTemp(6) queued)        ok
+   1_0 --TRYOPEN--> 3_0 (opens 3->2, doorOpened queued)       ok
+   bag semantics: TICK;TRYOPEN and TRYOPEN;TICK meet at 5_0   ok
+   4_0 offers both queued payloads, 6 and 7                   ok
+   4_0's two REPORTTEMPs lead to 2 DISTINCT states            ok
+   neither 6 nor 7 flips compressorOn (7 > 7 is false)        ok
+   4_0 --TICK--> 9_0 has temp 8, ticksLeft 3, 3 reportTemps queued ok
+   reportTemp(8) sets compressorOn and queues turnOn          ok
+   turnOn increments cycles AND queues cool() on the sensor   ok
+   cool() subtracts 10 (10 -> 0)                              ok
+   cool() floors at 0, never negative (4 -> 0)                ok
+   reportTemp(1) with compressorOn clears it and queues turnOff ok
+   turnOff resets consecutiveOnCycles to 0                    ok
+   doorOpened is UNCAPPED: 13 -> 16 (kept deliberately)       ok
+   tick IS capped: temp stays 15 while ticksLeft still decrements ok
+   tick with ticksLeft 0 consumes the message and sends nothing ok
+   tryOpen with opensLeft 0 consumes the message and sends nothing ok
+   all queues empty == terminal (this is the intended end of a run) ok
+
+=== 2. the FULL state space (enumerated here, not by Afra) ===
+reachable states : 166652
+transitions      : 773800
+max BFS depth    : 29
+transitions by label:
+   TICK         97244
+   TRYOPEN     102919
+   DOOROPENED   67044
+   REPORTTEMP  393504
+   TURNON       28004
+   COOL         35405
+   TURNOFF      49680
+TURNON : TURNOFF = 0.6 : 1
+terminal states (all queues empty) : 53
+   final compressorOn True : 29/53 = 54.7%
+temperature range observed : 0 .. 20
+   (max > 15 confirms the uncapped doorOpened() bug)
+consecutiveOnCycles values : [0, 1, 2, 3]
+   max sensor      queue = 5  (declared cap 12)
+   max door        queue = 1  (declared cap 6)
+   max controller  queue = 6  (declared cap 9)
+   max compressor  queue = 5  (declared cap 9)
+
